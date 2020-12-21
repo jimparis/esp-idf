@@ -395,14 +395,52 @@ static int ws_read(esp_transport_handle_t t, char *buffer, int len, int timeout_
     int rlen = 0;
     transport_ws_t *ws = esp_transport_get_context_data(t);
 
+next_header:
     // If message exceeds buffer len then subsequent reads will skip reading header and read whatever is left of the payload
     if (ws->frame_state.bytes_remaining <= 0) {
-        if ( (rlen = ws_read_header(t, buffer, len, timeout_ms)) <= 0) {
+
+        // ws_read_header doesn't differentiate between "0 byte
+        // payload" and "timeout"; both return 0.  Reset the opcode so
+        // that we don't mistake a timeout for a 0-byte PING.
+        ws->frame_state.opcode = 0xff;
+
+        if ( (rlen = ws_read_header(t, buffer, len, timeout_ms)) < 0) {
             // If something when wrong then we prepare for reading a new header
             ws->frame_state.bytes_remaining = 0;
             return rlen;
         }
+
+        // timeout, or non-PING empty packet
+        if (rlen == 0 && ws->frame_state.opcode != WS_OPCODE_PING)
+            return 0;
+
+        // PING received; read payload and send a PONG
+        if (ws->frame_state.opcode == WS_OPCODE_PING) {
+            int plen = ws->frame_state.payload_len;
+            ESP_LOGW(TAG, "got PING with %d bytes payload", plen);
+            if (plen > 125) {
+                ESP_LOGE(TAG, "PING payload too big (%d)", plen);
+                ws->frame_state.bytes_remaining = 0;
+                return 0;
+            }
+            static char payload[125];
+            rlen = ws_read_payload(t, payload, plen, timeout_ms);
+            if (rlen != plen) {
+                ESP_LOGE(TAG, "PING payload read failed (%d)", rlen);
+                return 0;
+            }
+            rlen = _ws_write(t, WS_OPCODE_PONG | WS_FIN, 0, payload,
+                             plen, timeout_ms);
+            if (rlen != plen) {
+                ESP_LOGE(TAG, "PONG send failed (%d)", rlen);
+                return 0;
+            }
+
+            // PONG sent -- now read next header
+            goto next_header;
+        }
     }
+
     if (ws->frame_state.payload_len) {
         if ( (rlen = ws_read_payload(t, buffer, len, timeout_ms)) <= 0) {
             ESP_LOGE(TAG, "Error reading payload data");
