@@ -28,3 +28,5 @@ ecdsa>=0.16.0
 # marker for detecting MSYS2. So instead, a dummy custom package is used with "windows-curses" dependency for Windows
 # command line.
 file://${IDF_PATH}/tools/kconfig_new/esp-windows-curses; sys_platform == 'win32'
+
+python-socketio<5; python_version<="2.7"
